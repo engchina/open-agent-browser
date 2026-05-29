@@ -1,0 +1,76 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Lint and policy checks
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Generate dependency license report
+        run: pnpm license:report
+
+      - name: Package release artifacts
+        run: pnpm package:release -- --out-dir artifacts/release
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-agent-browser-release-${{ github.run_number }}
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes_file="$(find artifacts/release -name '*-release-notes-*.md' -print -quit)"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/release/*.zip artifacts/release/*.json --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" artifacts/release/*.zip artifacts/release/*.json \
+              --title "Open Agent Browser $GITHUB_REF_NAME" \
+              --notes-file "$notes_file" \
+              --verify-tag
+          fi

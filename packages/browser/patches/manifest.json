@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "patches": [
+    {
+      "cleanRoomSpec": "docs/clean-room/behavior-spec.md",
+      "description": "Reserve a tracked placeholder for the future Chromium-side entry point that will expose the local agent side panel from an owned browser build.",
+      "id": "0001-agent-side-panel-entrypoint",
+      "path": "packages/browser/patches/0001-agent-side-panel-entrypoint.patch",
+      "status": "planned",
+      "target": "chromium/src"
+    }
+  ]
+}

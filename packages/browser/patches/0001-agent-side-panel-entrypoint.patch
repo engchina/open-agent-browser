@@ -1,0 +1,12 @@
+# Planned owned Chromium patch.
+# No Chromium source changes are included yet.
+#
+# Purpose:
+# - Add an owned browser-side entry point for opening the local agent side panel
+#   from a future Chromium build.
+#
+# Clean-room source:
+# - docs/clean-room/behavior-spec.md
+#
+# Status:
+# - planned

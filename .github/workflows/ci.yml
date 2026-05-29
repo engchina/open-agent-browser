@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Lint and policy checks
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Generate dependency license report
+        run: pnpm license:report
+
+      - name: Generate release package preview
+        run: pnpm package:release -- --out-dir artifacts/ci
+
+      - name: Upload package preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-agent-browser-package-preview
+          path: artifacts/ci/*
+          if-no-files-found: error
+          retention-days: 7

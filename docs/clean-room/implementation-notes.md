@@ -1,0 +1,101 @@
+# Clean-Room Implementation Notes
+
+## Current Implementation
+
+- The workspace is a pnpm monorepo with original package names under `@open-agent-browser/*`.
+- Shared API contracts live in `packages/shared` and are written from this project spec.
+- The local server uses Node's built-in HTTP server and `node:sqlite`.
+- The extension uses WXT + React, Chrome extension APIs, and local loopback HTTP.
+- The loopback server accepts missing Origin headers for local tooling, accepts browser extension origins, and rejects ordinary web page origins unless `OAB_ALLOWED_ORIGINS` explicitly lists them.
+- `/v1/chat` accepts sanitized page snapshots from the extension and can use disabled, Ollama, or OpenAI-compatible provider modes.
+- `/v1/tools/execute` accepts public `{toolName, args, confirmationToken?}` requests and normalizes them to internal browser tool calls with server-generated IDs when needed.
+- Provider responses may include a JSON `toolCalls` proposal. The server parses that proposal as untrusted data, validates tool names and arguments through the shared schemas, de-duplicates existing local steps, and routes high-risk proposals through the same approval registry.
+- `/v1/page/snapshot` supports extension-published snapshots through SQLite-backed local storage when the agent server has a database, with an in-memory fallback for tests and embedded use.
+- `DELETE /v1/page/snapshot` clears locally saved snapshots by tab or globally, and the side panel exposes the clear action beside the context policy controls.
+- The side panel applies `visible-text`, `interactive-elements`, or `full-snapshot` context policy before publishing a snapshot or sending a chat request.
+- `/v1/chat` applies the same context policy again on the server side before planning or provider use, so extension bugs or direct local clients cannot widen the selected context boundary.
+- The shared `visible-text` context policy removes links, elements, heading outlines, and table summaries; structured page data is available only under broader policies.
+- The extension `getPageSnapshot` tool honors `includeLinks` and `includeInputs` before sanitization: callers can drop anchor/link data and input/select/textarea elements while preserving other controls such as buttons.
+- Snapshot sanitization keeps non-secret form hints such as field names, accessible labels, placeholders, autocomplete values, roles, and input types so local planning can identify fields while still redacting captured input values and secret-like attributes.
+- Snapshot sanitization redacts sensitive text patterns across text, labels, headings, link text, table cells, and titles, and it redacts sensitive URL query values before snapshots are stored or sent to providers.
+- Snapshot capture derives accessible labels from `aria-label`, `aria-labelledby`, associated `<label>` elements, wrapping labels, titles, alt text, and placeholders, then makes those labels available to local planning and provider prompts.
+- Snapshot capture now includes bounded heading outlines and bounded HTML table summaries. These structures are sanitized through shared contracts and included in provider prompts for non-`visible-text` context policies.
+- Snapshot selector generation prefers element IDs and unique `name` attributes, then falls back to parent-scoped `nth-of-type` CSS paths. This avoids using global element indexes that can point at the wrong control.
+- Snapshot capture filters hidden, inert, and aria-hidden controls out of actionable element metadata, while click/type execution separately rejects hidden, disabled, and non-editable selector targets.
+- The side panel can accept a `tabId` query parameter for smoke/development entry points; otherwise it uses the active tab.
+- Task runs, tool results, and audit events are stored in SQLite and updated through `/v1/tasks/{taskId}/tool-results`.
+- Task artifacts are stored in SQLite and exposed through `GET /v1/tasks/{taskId}/artifacts`. Completed `extractLinks`, `extractText`, `getPageSnapshot`, and `screenshot` results produce local artifacts, and persisted agent output produces JSON or text artifacts.
+- `DELETE /v1/tasks/{taskId}/artifacts/{artifactId}` removes one derived artifact without deleting the task run or original summarized tool result.
+- Artifact creation and deletion audit records metadata only: IDs, source, kind, MIME type, byte length, and title. Artifact content stays out of audit payloads.
+- Tool result reports are accepted only when the reported step ID, tool call ID, and result tool name match the task plan, and when the result status is a terminal browser execution state. Mismatches and non-terminal statuses return `400` and are not written to task history or audit continuation flow.
+- `POST /v1/tasks/{taskId}/cancel` marks pending, running, and blocked steps as `canceled`, revokes outstanding approval tokens whose tool call IDs belong to that task plan, publishes a task update, writes `task.canceled` audit metadata, and prevents later tool result reports from mutating the canceled task.
+- `POST /v1/tasks/cancel-all` applies the same cancellation and approval-revocation behavior to every active task and publishes each canceled task update. Its `tasks.canceled` audit payload stores task IDs, counts, optional reason, and revoked approval count only.
+- `DELETE /v1/tasks/{taskId}` removes the task run, stored tool results, persisted task output, and derived artifacts, then writes metadata-only `task.deleted` audit. It also revokes outstanding approval tokens for that task plan.
+- `/v1/events` is implemented as a small dependency-free WebSocket endpoint for local task/audit metadata streaming and applies the same Origin guard during upgrade.
+- Tool result reports can return a continuation message. Link extraction stores deterministic link JSON, and explicit pricing-to-JSON requests capture a structured page snapshot, parse pricing tables first, then fall back to text parsing before storing JSON output on the task run.
+- Tool result reports can also trigger provider continuation when a provider is configured and the task has not reached the local provider-generated step budget. The provider sees a bounded summary of the task and recent persisted tool observations, then any returned `toolCalls` are validated, marked as `provider-continuation`, appended to the task plan, and approval-gated before execution.
+- The side panel auto-continues newly unblocked safe pending steps after an approved high-risk step completes.
+- The side panel also auto-runs safe pending steps immediately after a chat plan is created.
+- The side panel safe-step runner now loops through newly appended safe provider follow-up steps up to a fixed local maximum, then stops and asks the user to review the remaining plan.
+- Form planning can target name and email fields from the sanitized snapshot and keep submit as a separate approval-gated click.
+- The extension `type` tool uses the native input/textarea value setter plus input/change events so framework-controlled fields can observe approved typed values.
+- Browser-control planning can map scroll, key-press, and visible/full-page screenshot requests to the shared browser tool contract; key presses remain approval-gated.
+- Browser-control planning can map tab-list requests to `listTabs` and explicit tab ID switch requests to `activateTab`. Both are validated by the local server, executed through Chrome's tabs API, and treated as local safe actions because they do not mutate remote page state.
+- Browser-control planning can map explicit new-tab URL requests to `openTab` and explicit tab ID close requests to `closeTab`. Both are validated by the local server and approval-gated before the extension calls Chrome's tabs API.
+- Browser-control planning can map explicit download URL requests to `downloadUrl`. The server treats downloads as high-risk, carries the locally observed source URL into approval summaries, and the extension calls Chrome's downloads API only after the server returns `queued`.
+- Browser-control planning can map a named click request to a visible button/link-like element from the sanitized snapshot. The reviewed tool call carries the matched selector, observed page URL, and target label, while sensitive controls such as send, submit, payment, purchase, delete, or download are marked high risk.
+- Pure submit/click requests no longer create default form typing actions; field typing is planned only when the user supplies or asks for a field value.
+- Full-page screenshots are produced in the extension by scrolling the active tab, capturing visible tiles, restoring the original scroll position, and stitching the tiles in an extension-owned canvas.
+- Task history storage summarizes screenshot data URLs into redacted metadata so raw screenshot images are not persisted in SQLite.
+- Approval rejection is an explicit loopback API path that validates the pending token, optional tool call ID, and optional task/step binding before consuming the token, writing audit metadata, or persisting a rejected tool result onto the task run.
+- Approval tokens are matched against the reviewed tool name, tab ID, and validated arguments before they are consumed, so a token for one risky action cannot approve a different browser action.
+- Approval tokens carry an `expiresAt` timestamp, default to a short local TTL, and are removed before execution, inspection, rejection, or cancellation revocation when expired.
+- Approval cards use the shared approval-summary helper to show reviewable action details such as selector, URL, typed text, or key, while redacting password/token/secret/card-like values before display.
+- Approval requests classify semantic risk: ordinary clicks remain medium risk, while cross-origin navigation, submit, send, download, login, payment, purchase, delete, and account-changing actions are highlighted as high risk.
+- Provider-supplied approval reasons are appended as `Provider note` text after the local safety reason, so untrusted provider output cannot replace the browser's own risk explanation.
+- Locally planned navigation approvals carry the current page URL into the reviewed tool call when a sanitized snapshot is attached; provider-proposed navigation ignores any provider-supplied source URL and uses the local page/task context instead.
+- Locally planned and provider-proposed `click`, `type`, and `press` approvals carry the locally observed page URL as `expectedUrl`; the extension checks the live tab URL before dispatching the reviewed page-changing action.
+- Form submit planning carries the target control's sanitized text/label and selector into the click approval description, improving reviewability without copying raw DOM.
+- The side panel includes Chat, History, Audit, and Memory views backed by the loopback API.
+- The new tab page reads the same packaged or stored agent base URL as the side panel, shows local agent/provider status, and exposes side-panel/options launch actions.
+- The new tab task field stores a short-lived local launch draft, and the side panel consumes that draft once to pre-fill the task composer.
+- Browser context menus can create the same short-lived local launch draft for the current page, selected text, or a link URL, then open the side panel for user review without auto-submitting the task.
+- The extension registers the `agent` omnibox keyword; address-bar input creates the same short-lived side panel draft for user review without auto-submitting the task.
+- The extension registers browser commands for opening the side panel and drafting a current-page summary task; command-generated drafts still require user review before submission.
+- The side panel opens `WS /v1/events`, displays live stream status, and merges task/audit events into the current UI state.
+- The History view fetches task details through `GET /v1/tasks/{taskId}`, fetches artifacts through `GET /v1/tasks/{taskId}/artifacts`, renders plan/results/output/artifacts, can copy, download, or delete artifacts, can stop all active tasks, can delete task history records, and can resume safe pending steps in Chat.
+- Memory writes are pending until confirmed; audit events record request/confirm metadata.
+- Confirmed memories can be deleted from the side panel and through `DELETE /v1/memory/{memoryId}`; deletion audit metadata stores only the memory ID and tags.
+- Confirmed memories are passed into chat planning/provider prompts as bounded preference context; chat plan audit payloads store memory counts instead of memory content.
+- Provider configuration is stored in SQLite through `/v1/provider-config`, with environment variables taking precedence.
+- Provider connectivity can be tested through `/v1/provider-config/test` without saving the submitted config.
+- `packages/browser` can launch a Chromium-compatible executable with an isolated profile and the built extension loaded, writes an owned `open-agent-config.json` runtime file into the built extension output with only the selected loopback agent URL, and opens the extension-backed `chrome://newtab/` launch panel by default.
+- `packages/browser` can generate the external Chromium `.gclient` config through `configure:chromium`. The command writes only the ignored external workspace config and does not sync, patch, build, or vendor Chromium source.
+- `packages/browser` can clone or update `depot_tools` into the ignored external Chromium workspace through `bootstrap:depot-tools`; the toolchain checkout is not packaged or committed. The command supports `OAB_GIT_SSL_BACKEND` as a per-command Git TLS backend override for Windows environments where the default backend cannot reach the public repository, and Chromium sync passes the same scoped override to git subprocesses launched by `gclient`. Chromium readiness checks now verify concrete `gclient`, `gn`, and `autoninja` entrypoints inside that external checkout, not just the parent directory. `bootstrap:cipd-client` can also download the matching external CIPD client with a SHA256 check and prepare Windows `cipd.exe` aliases for PATH and vpython's `.cipd_bin` bundle directory when the `depot_tools` PowerShell bootstrap path fails in the local Windows environment. Chromium command wrappers default vpython cache state into the ignored external workspace.
+- `packages/browser/patches/manifest.json` tracks owned Chromium patches. The manifest check rejects missing files, duplicate IDs, and patch paths outside the managed patch directory.
+- `packages/browser` prints a clean-room Chromium workspace/build plan and can check or apply only active owned patches against an external checkout.
+- `packages/browser` exposes explicit `sync:chromium`, `gen:chromium`, and `build:chromium` wrappers for the planned `gclient`, `gn`, and `autoninja` commands. These wrappers target only the ignored external Chromium workspace, prepend the external `depot_tools` and `.cipd_bin` paths, and support dry-run output before any external command is executed.
+- `pnpm smoke:e2e` validates the extension-to-agent loop, loopback Origin blocking for ordinary web pages, snapshot bridge, scoped `getPageSnapshot` capture options, sensitive text and URL redaction, accessible label capture, structured heading/table capture, replayable snapshot selectors for anonymous controls, semantic high-risk click planning from a named visible control, hidden-control omission and execution blocking, stale page approval blocking, tab listing, explicit tab activation, approval-gated tab opening, approval-gated tab closing, and approval-gated direct downloads, extension WebSocket event stream, connected new tab launch panel, new-tab-to-side-panel task draft handoff, link extraction continuation output and artifacts, side panel Chat UI task entry, side panel task detail and artifact rendering/deletion, side panel task history deletion, side panel task cancellation controls, side panel History `Stop active`, side panel approval detail rendering, cross-site navigation approval context, side panel automatic safe follow-up execution after provider continuation, side panel persistence of extension-side tool execution errors, guarded navigation dependencies, browser-control tools for scroll/press/full-page screenshot, screenshot history redaction, explicit approval rejection, guarded name/email form fill with submit confirmation, controlled-input typing, structured pricing-table JSON continuation, approval flow, memory confirmation and deletion flow, confirmed-memory provider context, OpenAI-compatible provider flow, provider-proposed safe tool planning, provider reason hardening for high-risk actions, provider continuation after a browser observation, and Ollama local-provider flow in a real Chromium-compatible browser using owned local fixture and fake-provider servers.
+- Chromium source is expected to live outside this repository. Only owned patch files belong under `packages/browser/patches`.
+- Release packaging requires `docs/compliance/dependency-license-report.md`; CI generates it before package previews, and `package:release` fails instead of producing clean-room release archives without a dependency license inventory.
+
+## Originality Controls
+
+- The code intentionally avoids upstream package names and internal paths.
+- The clean-room check scans implementation files, project docs outside the provenance source log, and package manifests for disallowed upstream project identifiers, package names, GitHub org names, and internal path markers.
+- The license check scans the installed pnpm package tree and rejects AGPL/GPL/LGPL-only packages or upstream browser-agent package names.
+- `pnpm license:report` writes `docs/compliance/dependency-license-report.md`, a full installed-package license inventory with package name, version, license metadata, and package metadata path.
+- Dual-license expressions such as `MIT OR GPL-3.0-or-later` pass only when a recognized permissive option is present.
+- Chromium patch changes must be represented in the owned patch manifest before they are applied to an external checkout.
+- `pnpm --filter @open-agent-browser/browser check:chromium` verifies present external `.gclient` and checkout remote provenance against the configured Chromium source repository before developers trust patch/build operations.
+- Documentation may mention upstream project URLs for provenance, but implementation files must not.
+- Any future patch must include a short note describing the public platform API or internal spec it implements.
+
+## Known MVP Limits
+
+- Provider calls can now propose validated tool calls during initial planning and after tool-result observations. Provider continuation steps carry local provenance and are capped by `OAB_MAX_PROVIDER_CONTINUATION_STEPS`; richer branching state machines are not implemented yet.
+- Browser actions are executed by the extension after the local server validates and approves tool calls, then reported back to the server and persisted.
+- The dev launcher honors `OAB_BROWSER_EXECUTABLE`, then prefers the owned Chromium build output under the external checkout before falling back to installed Chrome/Chromium/Edge. Chromium sync/build and patch commands remain explicit, dry-runnable wrappers and are not automatically run by `pnpm dev:browser`.
+- Chromium sync may still need to be launched from a normal non-sandboxed Windows shell if vpython cannot acquire lock files inside the ignored external workspace.
+- Snapshot publication is local-server scoped; cross-device or cloud browser/server synchronization is not implemented.
+- Dependency license reporting is generated from installed pnpm metadata; a human legal review is still required before commercial release.

@@ -1,0 +1,36 @@
+{
+  "name": "@open-agent-browser/browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check:chromium": "tsx src/checkChromium.ts",
+    "check:patches": "tsx src/checkPatches.ts",
+    "bootstrap:cipd-client": "tsx src/bootstrapCipdClient.ts",
+    "bootstrap:depot-tools": "tsx src/bootstrapDepotTools.ts",
+    "build:chromium": "tsx src/runChromiumCommand.ts build",
+    "configure:chromium": "tsx src/configureChromium.ts",
+    "gen:chromium": "tsx src/runChromiumCommand.ts generate",
+    "launch:dev": "tsx src/runDevBrowser.ts",
+    "lint": "tsc -p tsconfig.json --noEmit --pretty false && pnpm check:patches",
+    "patches:apply": "tsx src/applyChromiumPatches.ts --apply",
+    "patches:check-apply": "tsx src/applyChromiumPatches.ts",
+    "plan:chromium": "tsx src/planChromium.ts",
+    "prepare:chromium": "tsx src/prepareChromium.ts",
+    "sync:chromium": "tsx src/runChromiumCommand.ts sync",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "vitest": "^4.0.14"
+  }
+}
